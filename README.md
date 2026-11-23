@@ -39,6 +39,12 @@ Live at **https://nliptas.pages.dev**
   The count is how many blocks you've given that label: relabeling a block,
   clearing its label or switching it between signal and noise gives one back.
   Under the label there's an optional Details line (e.g. "history essay").
+- **Desktop tracker** — optional. A script on your computer (`tracker/`) reads
+  ActivityWatch, has AI sort each 5 minutes into signal or noise, and fills in
+  hours you haven't scored. Auto blocks are shaded lighter with a dashed edge;
+  switching, relabeling or splitting one makes it yours. It signs in with an
+  access key from Settings, which can only reach `/api/autolog` and only fills
+  empty slots. Only signal/noise and a label reach the site, never window titles.
 - **Undo** — ⌘Z / Ctrl+Z and ⇧⌘Z / Ctrl+Y undo and redo your own changes.
 - **History** — every day in reverse order with both hour strips and both scores.
 - **Analysis** — signal share per day, where the hours went, what the signal
@@ -54,6 +60,7 @@ The headline number is signal ÷ (signal + noise). The raw S:N ratio sits beside
 | `build.sh` | Wraps it into `public/index.html` for static hosting. |
 | `public/index.html` | Generated. Committed so Pages needs no build step. |
 | `functions/api/[[path]].js` | Pages Function: accounts, friends and the ledger on Cloudflare KV. |
+| `tracker/` | Desktop tracker: fills in unscored hours from ActivityWatch. See `tracker/README.md`. |
 | `scripts/seed-accounts.mjs` | One-off that created the nliu and kbahl accounts over the existing data. |
 
 Run `./build.sh` after every edit to `signal-ledger.html`.
@@ -68,6 +75,8 @@ Run `./build.sh` after every edit to `signal-ledger.html`.
 | `months:<store>` | Which months have a ledger doc. |
 | `ledger:<store>:<YYYY-MM>` | Every day in that month, by calendar date (midnight to midnight, whatever range it is shown in). |
 | `tasks:<store>` | The running task list. |
+| `apikeys:<username>` | That person's tracker access keys (name, dates, SHA-256 of the key). |
+| `apikey:<sha256>` | Which account a key belongs to. The key itself is never stored. |
 
 `store` is the username for everyone who signs up. The two original accounts
 point at the data from before accounts existed: `nliu` → `nathan`, `kbahl` →

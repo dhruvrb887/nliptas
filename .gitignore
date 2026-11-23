@@ -4,3 +4,9 @@ node_modules/
 .env
 .DS_Store
 backups/
+
+# Desktop tracker: personal config (keys) and local state
+tracker/config.json
+tracker/.state.json
+tracker/.cache.json
+tracker/*.tmp

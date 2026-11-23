@@ -293,10 +293,15 @@ body:has(.areamenu) .selbar,body:has(.dragtip) .selbar{display:none}
 .evt.one{flex-direction:row;align-items:center;gap:8px;padding-block:0}
 .evt.s{background:color-mix(in srgb,var(--signal) 20%,var(--panel));border-color:var(--signal);color:color-mix(in srgb,var(--signal) 75%,var(--ink))}
 .evt.n{background:color-mix(in srgb,var(--noise) 20%,var(--panel));border-color:var(--noise);color:color-mix(in srgb,var(--noise) 75%,var(--ink))}
+.evt.auto{border-left-style:dashed;background:color-mix(in srgb,var(--signal) 9%,var(--panel))}
+.evt.n.auto{background:color-mix(in srgb,var(--noise) 9%,var(--panel))}
 .evt .grip{position:absolute;left:0;right:0;height:7px;cursor:ns-resize}
 .evt .grip.top{top:0}.evt .grip.bot{bottom:0}
 .evt.tiny{padding:0}.evt.tiny>b,.evt.tiny>.when{display:none}.evt.tiny .grip{height:3px}
 .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2)}
+.keybox{margin:10px 0;padding:10px 12px;border:1px dashed var(--line-2);border-radius:8px}
+.keytext{display:block;margin:6px 0 8px;font-family:var(--f-mono);font-size:12px;word-break:break-all;user-select:all}
+.keyrow{justify-content:space-between;font-size:13px;margin:6px 0}
 .key{display:inline-flex;align-items:center;gap:6px}
 .swatch{width:13px;height:13px;border-radius:4px;border:1px solid var(--line-2);display:grid;place-items:center;font-family:var(--f-mono);font-size:8px;font-weight:700;color:#fff}
 .score{display:flex;align-items:baseline;gap:6px}
@@ -1423,6 +1428,7 @@ function settingsView(){
   head.appendChild(el("h2",null,"Settings"));
   f.appendChild(head);
   f.appendChild(dayCard());
+  f.appendChild(trackerCard());
   f.appendChild(accountCard());
   return f;
 }
@@ -1468,6 +1474,69 @@ function dayCard(){
       dayMsg={t:e==="offline"?"You're offline, so this wasn't saved.":"Couldn't save that ("+e+")."};render();
     });
   };
+  return c;
+}
+
+/* Access keys for the desktop tracker (tracker/ in the repo). A key can only
+   fill in empty hours; it can't read or change anything else. */
+var trackerKeys=null,trackerNew="",trackerMsg="",trackerArm="";
+/* By calendar date, not by when your day starts: a key made at 1am is "today". */
+function calAgo(stamp){
+  var d=Math.round((parseISO(iso(new Date()))-parseISO(iso(new Date(stamp))))/864e5);
+  return d<=0?"today":d===1?"yesterday":d+" days ago";
+}
+function trackerCard(){
+  var c=el("div","card");
+  c.appendChild(el("h3",null,"Desktop tracker"));
+  c.appendChild(el("div","note","The tracker runs on your computer and fills in hours you haven't scored, shaded lighter so you can check them. Switching, relabeling or splitting an auto block makes it yours. Give it an access key from here: a key can only fill in empty hours."));
+  function load(){
+    api("GET","keys").then(function(res){trackerKeys=res.keys;softRender();},function(e){
+      if(e==="unauthorized"){signedOut();return;}
+      trackerKeys=[];trackerMsg=e==="offline"?"You're offline.":"Couldn't load keys ("+e+").";softRender();
+    });
+  }
+  if(trackerKeys===null){trackerKeys=[];load();}
+  if(trackerNew){
+    var box=el("div","keybox");
+    box.appendChild(el("div","note","Your new key. Copy it into the tracker's config now: it won't be shown again."));
+    var code=el("code","keytext",trackerNew);
+    box.appendChild(code);
+    var r0=el("div","row");
+    r0.appendChild(btn("ghost","Copy",function(ev){
+      var b=ev.currentTarget;
+      try{navigator.clipboard.writeText(trackerNew).then(function(){b.textContent="Copied";});}catch(err){}
+    }));
+    r0.appendChild(btn("ghost","Done",function(){trackerNew="";render();}));
+    box.appendChild(r0);
+    c.appendChild(box);
+  }
+  (trackerKeys||[]).forEach(function(k){
+    var r=el("div","row keyrow");
+    var used=k.lastUsedAt?"last used "+calAgo(k.lastUsedAt):"not used yet";
+    r.appendChild(el("span",null,k.name+" · made "+calAgo(k.createdAt)+" · "+used));
+    r.appendChild(btn("ghost","Revoke",function(){
+      if(trackerArm!==k.id){trackerArm=k.id;trackerMsg="Click Revoke again to switch off “"+k.name+"”.";render();return;}
+      trackerArm="";
+      api("POST","keys",{action:"revoke",id:k.id}).then(function(res){trackerKeys=res.keys;trackerMsg="Revoked.";render();},function(e){trackerMsg="Couldn't revoke ("+e+").";render();});
+    }));
+    c.appendChild(r);
+  });
+  var r2=el("div","row");
+  var make=btn("ghost","New access key",function(){
+    make.disabled=true;
+    var name=(navigator.platform||"").indexOf("Mac")===0?"Mac":(navigator.platform||"").indexOf("Win")===0?"Windows PC":"Computer";
+    api("POST","keys",{action:"create",name:name}).then(function(res){
+      trackerKeys=res.keys;trackerNew=res.key;trackerMsg="";render();
+    },function(e){
+      make.disabled=false;
+      if(e==="unauthorized"){signedOut();return;}
+      trackerMsg=e==="too_many_keys"?"That's the most keys you can have. Revoke one first.":"Couldn't make a key ("+e+").";render();
+    });
+  });
+  r2.appendChild(make);
+  var m=el("span","note",trackerMsg);m.setAttribute("role","status");
+  r2.appendChild(m);
+  c.appendChild(r2);
   return c;
 }
 
@@ -2346,6 +2415,11 @@ function splitCombined(c){
 function kindOf(v){return v.charAt(0);}
 function areaOf(v){return parseV(v).area;}
 function sid(){return Math.random().toString(36).slice(2,8)||"b";}
+/* Blocks the desktop tracker filled in have 12-character ids starting "at"
+   (the page's own are at most 6). Switching, relabeling or splitting one gives
+   it an ordinary id, so it stops being shaded as auto: it's yours now. */
+function isAuto(id){return /^at[a-z0-9]{10}$/.test(id||"");}
+function ownId(id){return id&&!isAuto(id)?id:sid();}
 
 /* The block last clicked, drawn or moved is selected: Backspace/Delete (or its
    × button, for touch) removes it. Kept as a slot so it survives re-renders. */
@@ -2359,7 +2433,9 @@ function drawRuns(col,hours,editable,onCycle,selSlot){
     var isSel=editable&&selSlot!=null&&selSlot>=r.a&&selSlot<=r.b;
     var kind=kindOf(r.v),area=areaOf(r.v);
     var name=STATE_LABEL[kind]+(area?" · "+area:"");
-    var b=el("div","evt "+kind+(len*STEP<=15?" tiny":len<PER_HOUR?" one":"")+(isSel?" sel":""));
+    var auto=isAuto(parseV(r.v).id);
+    if(auto)name+=" (auto-logged)";
+    var b=el("div","evt "+kind+(auto?" auto":"")+(len*STEP<=15?" tiny":len<PER_HOUR?" one":"")+(isSel?" sel":""));
     b.style.top="calc("+r.a+" * var(--hh) / "+PER_HOUR+" + 1px)";
     b.style.height="max(2px, calc("+len+" * var(--hh) / "+PER_HOUR+" - 2px))";
     b.dataset.a=r.a;
@@ -2428,16 +2504,16 @@ function dayColumn(date,person,editable){
     var p=parseV(r.v);
     /* Switching sides drops the label, so it gives back its use. */
     if(p.area&&person===state.me){dropUse(person,p.area,p.kind);markTasksDirty(person);}
-    if(p.kind==="n"){commitSignal(fill(withoutRun(hours,r),r.a,r.b,mk("s",p.id||sid(),"")),r.a);return;}
+    if(p.kind==="n"){commitSignal(fill(withoutRun(hours,r),r.a,r.b,mk("s",ownId(p.id),"")),r.a);return;}
     select(r.a);
-    commit(fill(withoutRun(hours,r),r.a,r.b,mk("n",p.id||sid(),"")));
+    commit(fill(withoutRun(hours,r),r.a,r.b,mk("n",ownId(p.id),"")));
   }
   /* Halve a block (on a 5-minute line) so each part can be labeled or
      marked on its own; the lower half is selected. */
   function split(r){
     if(r.b<=r.a)return;
     var p=parseV(r.v),mid=r.a+Math.ceil((r.b-r.a+1)/2);
-    var next=fill(Object.assign({},hours),r.a,mid-1,mk(p.kind,p.id||sid(),p.area));
+    var next=fill(Object.assign({},hours),r.a,mid-1,mk(p.kind,ownId(p.id),p.area));
     fill(next,mid,r.b,mk(p.kind,sid(),p.area));
     select(mid);
     commit(next);
@@ -2695,7 +2771,9 @@ function tagRun(date,person,slot,name){
     if(name)name=useArea(person,name,kindOf(r.v));
     if(old||name)markTasksDirty(person);
   }
-  var sp=splitCombined(fill(c,r.a,r.b,mk(kindOf(r.v),parseV(r.v).id||sid(),name)));
+  var oldId=parseV(r.v).id,newId=ownId(oldId);
+  var sp=splitCombined(fill(c,r.a,r.b,mk(kindOf(r.v),newId,name)));
+  if(oldId&&newId!==oldId&&en.notes&&en.notes[oldId]){en.notes=Object.assign({},en.notes);en.notes[newId]=en.notes[oldId];}
   en.hours=sp.hours;en.areas=sp.areas;en.segs=sp.segs;en.notes=normNotes(en.notes,en.segs);
   markDirty(key(date,person));
   sel={date:date,person:person,slot:slot};

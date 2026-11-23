@@ -1,0 +1,25 @@
+{
+  "site": "https://nliptas.pages.dev",
+  "access_key": "slk_paste_the_key_from_settings_here",
+
+  "ai": true,
+  "anthropic_api_key": "sk-ant-paste_your_key_here",
+  "model": "claude-haiku-5-5",
+
+  "about_me": "I'm a student. Schoolwork, coding, reading, applications and learning count as signal. Games, YouTube for fun, social media and scrolling are noise. Music in the background doesn't matter: judge by what else is on screen.",
+
+  "rules": [
+    { "match": "Visual Studio Code", "kind": "signal", "label": "Coding" },
+    { "match": "Terminal", "kind": "signal", "label": "Coding" },
+    { "match": "docs.google.com", "kind": "signal", "label": "Schoolwork" },
+    { "match": "khanacademy.org", "kind": "signal", "label": "Schoolwork" },
+    { "match": "nliptas.pages.dev", "kind": "signal", "label": "Planning" },
+    { "match": "reddit.com", "kind": "noise", "label": "Reddit" },
+    { "match": "instagram.com", "kind": "noise", "label": "Instagram" },
+    { "match": "Steam", "kind": "noise", "label": "Games" }
+  ],
+
+  "ignore": ["loginwindow", "lockscreen", "screensaver"],
+  "min_active_minutes": 2.5,
+  "interval_minutes": 15
+}

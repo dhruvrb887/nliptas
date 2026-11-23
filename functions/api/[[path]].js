@@ -35,6 +35,10 @@
  * they accept. You can read a friend's scored hours, never write them; plans
  * (schedule blocks, task lists) stay private to their owner.
  *
+ * Access keys (Settings → Desktop tracker) let the tracker in tracker/ fill in
+ * hours without a password. They reach /api/autolog only, which fills empty
+ * slots and never overwrites scored ones. See "access keys" and "autolog" below.
+ *
  * Sessions are an HMAC-signed cookie (SESSION_SECRET, set with
  * `wrangler pages secret put SESSION_SECRET`); it never lives in this repo.
  * Passwords are PBKDF2-SHA256 with a per-user salt.
@@ -590,6 +594,199 @@ async function writeLedger(request, env, me) {
   return json({ ok: true, months: groups.size, lists: lists.length });
 }
 
+/* ---------------- access keys ---------------- */
+
+/* An access key lets a program on your computer (the tracker in tracker/)
+   fill in your hours without your password. A key can only reach
+   /api/autolog: it can't read or change anything else on the account.
+   Only a SHA-256 of each key is stored: `apikey:<hash>` { username, id },
+   and `apikeys:<username>` lists that person's keys for Settings. */
+const MAX_KEYS = 10;
+const KEY_PREFIX = "slk_";
+
+async function sha256hex(s) {
+  const buf = await crypto.subtle.digest("SHA-256", enc.encode(s));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function randomChars(n) {
+  const abc = "abcdefghijklmnopqrstuvwxyz0123456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(n));
+  let out = "";
+  for (const b of bytes) out += abc[b % abc.length];
+  return out;
+}
+const getKeys = async (env, name) => (await env.LEDGER.get(`apikeys:${name}`, "json")) || [];
+const publicKeys = (list) => list.map((k) => ({ id: k.id, name: k.name, createdAt: k.createdAt, lastUsedAt: k.lastUsedAt || "" }));
+
+async function keys(request, env, me) {
+  const list = await getKeys(env, me.username);
+  if (request.method === "GET") return json({ keys: publicKeys(list) });
+  const body = await readBody(request);
+  if (!body) return json({ error: "bad_json" }, 400);
+  if (body.action === "create") {
+    if (list.length >= MAX_KEYS) return json({ error: "too_many_keys" }, 400);
+    const name = str(body.name, 40).trim() || "Tracker";
+    const key = KEY_PREFIX + randomChars(40);
+    const hash = await sha256hex(key);
+    const entry = { id: randomChars(8), name, hash, createdAt: new Date().toISOString() };
+    await env.LEDGER.put(`apikey:${hash}`, JSON.stringify({ username: me.username, id: entry.id }));
+    list.push(entry);
+    await env.LEDGER.put(`apikeys:${me.username}`, JSON.stringify(list));
+    // The key itself is only ever shown this once.
+    return json({ key, keys: publicKeys(list) });
+  }
+  if (body.action === "revoke") {
+    const gone = list.find((k) => k.id === body.id);
+    if (!gone) return json({ error: "no_such_key" }, 404);
+    await env.LEDGER.delete(`apikey:${gone.hash}`);
+    const rest = list.filter((k) => k !== gone);
+    await env.LEDGER.put(`apikeys:${me.username}`, JSON.stringify(rest));
+    return json({ keys: publicKeys(rest) });
+  }
+  return json({ error: "bad_action" }, 400);
+}
+
+/* The account an `Authorization: Bearer slk_…` header belongs to, or null. */
+async function keyUser(request, env) {
+  const m = /^Bearer\s+(slk_[a-z0-9]{40})$/.exec(request.headers.get("authorization") || "");
+  if (!m) return null;
+  const hash = await sha256hex(m[1]);
+  const rec = await env.LEDGER.get(`apikey:${hash}`, "json");
+  if (!rec) return null;
+  const user = await getUser(env, rec.username);
+  if (!user) return null;
+  // Note when a key was last used, at most once an hour, for Settings.
+  const list = await getKeys(env, user.username);
+  const k = list.find((x) => x.hash === hash);
+  if (!k) return null;
+  if (!k.lastUsedAt || Date.now() - Date.parse(k.lastUsedAt) > 36e5) {
+    k.lastUsedAt = new Date().toISOString();
+    await env.LEDGER.put(`apikeys:${user.username}`, JSON.stringify(list));
+  }
+  return user;
+}
+
+/* ---------------- autolog ---------------- */
+
+/* Blocks the tracker fills in get ids of the form `at` + 10 characters. The
+   page's own ids are at most 6 characters, so the page can tell them apart
+   and shade them lighter; switching, relabeling or splitting a block in the
+   page gives it an ordinary id, which makes it yours. */
+const AUTO_ID = /^at[a-z0-9]{10}$/;
+const MAX_AUTO_SLOTS = 2100; // a week of 5-minute slots
+const AUTO_BACK_DAYS = 15;
+
+const slotMinutes = (k) => {
+  const m = /^(\d{1,2}):([0-5][05])$/.exec(k);
+  return m && Number(m[1]) <= 23 ? Number(m[1]) * 60 + Number(m[2]) : -1;
+};
+const slotKey = (mins) => `${Math.floor(mins / 60)}:${String(mins % 60).padStart(2, "0")}`;
+function prevDate(date) {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+/* What the tracker needs before it classifies anything: your label menus. */
+async function autologInfo(env, user) {
+  const [list, prefs] = await Promise.all([env.LEDGER.get(`tasks:${user.store}`, "json"), getPrefs(env, user.username)]);
+  const live = (v) => (Array.isArray(v) ? v : []).filter((a) => a && a.name && !a.deletedAt)
+    .sort((a, b) => (b.uses || 0) - (a.uses || 0)).map((a) => a.name);
+  return json({ username: user.username, day: prefs.day, labels: { signal: live(list && list.areas), noise: live(list && list.noiseAreas) } });
+}
+
+/* Fill in slots from the tracker: { slots: [{ date, slot, kind, label }] }.
+   Only empty slots are filled. Anything already scored, by you or by an
+   earlier run, is left exactly as it is, so sending the same hours twice is
+   harmless and your own scoring always wins. */
+async function autolog(request, env, me) {
+  const body = await readBody(request);
+  if (!body) return json({ error: "bad_json" }, 400);
+  const raw = Array.isArray(body.slots) ? body.slots : [];
+  if (!raw.length) return json({ error: "no_slots" }, 400);
+  if (raw.length > MAX_AUTO_SLOTS) return json({ error: "too_many_slots" }, 400);
+
+  const today = new Date().toISOString().slice(0, 10);
+  const oldest = new Date(Date.now() - AUTO_BACK_DAYS * 864e5).toISOString().slice(0, 10);
+  const latest = new Date(Date.now() + 864e5).toISOString().slice(0, 10);
+  const slots = [];
+  for (const s of raw) {
+    const mins = slotMinutes(s && s.slot);
+    if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(s.date || "") || mins < 0 || mins % 5) return json({ error: "bad_slot" }, 400);
+    if (s.date < oldest || s.date > latest) return json({ error: "date_out_of_range", today }, 400);
+    if (s.kind !== "s" && s.kind !== "n") return json({ error: "bad_kind" }, 400);
+    slots.push({ date: s.date, mins, kind: s.kind, label: str(s.label, 60).trim() });
+  }
+  slots.sort((a, b) => (a.date === b.date ? a.mins - b.mins : a.date < b.date ? -1 : 1));
+
+  // Load every month touched, plus the day before the first slot so a block
+  // running over midnight carries on instead of starting again.
+  const docs = new Map();
+  const doc = async (month) => {
+    if (!docs.has(month)) docs.set(month, (await env.LEDGER.get(`ledger:${me.store}:${month}`, "json")) || {});
+    return docs.get(month);
+  };
+  const changed = new Set();
+  const day = async (date, create) => {
+    const d = await doc(date.slice(0, 7));
+    if (!d[date]) {
+      if (!create) return null;
+      d[date] = { step: 5, mid: 1, blocks: [], tasks: "", hours: {}, areas: {}, segs: {}, notes: {} };
+    }
+    const e = d[date];
+    fiveMinute(e);
+    e.hours = e.hours || {}; e.areas = e.areas || {}; e.segs = e.segs || {}; e.notes = e.notes || {};
+    return e;
+  };
+
+  let filled = 0;
+  const newBlocks = []; // [kind, label] for each block started, to count label uses
+  for (const s of slots) {
+    const e = await day(s.date, true);
+    const k = slotKey(s.mins);
+    if (e.hours[k]) continue;
+    // Carry on the block just before this slot when it's one of ours with the
+    // same mark and label; otherwise start a new block.
+    const pe = s.mins ? e : await day(prevDate(s.date), false);
+    const pk = slotKey(s.mins ? s.mins - 5 : 23 * 60 + 55);
+    const pid = pe && pe.segs[pk];
+    let id;
+    if (pid && AUTO_ID.test(pid) && pe.hours[pk] === s.kind && (pe.areas[pk] || "") === s.label) id = pid;
+    else { id = "at" + randomChars(10); newBlocks.push([s.kind, s.label]); }
+    e.hours[k] = s.kind;
+    e.segs[k] = id;
+    if (s.label) e.areas[k] = s.label; else delete e.areas[k];
+    e.updatedAt = new Date().toISOString();
+    changed.add(s.date.slice(0, 7));
+    filled++;
+  }
+
+  if (changed.size) {
+    const known = new Set(await monthsOf(env, me.store));
+    const fresh = [...changed].filter((m) => !known.has(m));
+    if (fresh.length) await env.LEDGER.put(`months:${me.store}`, JSON.stringify([...known, ...fresh].sort()));
+    await Promise.all([...changed].map((m) => env.LEDGER.put(`ledger:${me.store}:${m}`, JSON.stringify(docs.get(m)))));
+  }
+
+  // Each new labeled block counts as a use of its label, the same as picking
+  // it in the page, so the menus stay in order. Labels you removed stay removed.
+  const labeled = newBlocks.filter((b) => b[1]);
+  if (labeled.length) {
+    const list = (await env.LEDGER.get(`tasks:${me.store}`, "json")) || { items: [], groups: [], migrated: false, areas: [], noiseAreas: [] };
+    for (const [kind, label] of labeled) {
+      const field = kind === "n" ? "noiseAreas" : "areas";
+      if (!Array.isArray(list[field])) list[field] = [];
+      const hit = list[field].find((a) => a && a.name && a.name.toLowerCase() === label.toLowerCase());
+      if (hit) { if (!hit.deletedAt) hit.uses = (hit.uses || 0) + 1; }
+      else if (list[field].length < MAX_AREAS) list[field].push({ name: label, uses: 1 });
+    }
+    list.updatedAt = new Date().toISOString();
+    await env.LEDGER.put(`tasks:${me.store}`, JSON.stringify(list));
+  }
+
+  return json({ ok: true, filled, skipped: slots.length - filled, blocks: newBlocks.length });
+}
+
 /* ---------------- routing ---------------- */
 
 export async function onRequest({ request, env, params }) {
@@ -607,6 +804,15 @@ export async function onRequest({ request, env, params }) {
   if (route === "login" && method === "POST") return login(request, env);
   if (route === "logout" && method === "POST") return json({ ok: true }, 200, { "set-cookie": sessionCookie("", 0) });
 
+  // The tracker signs in with an access key, which reaches this route only.
+  if (route === "autolog") {
+    const user = await keyUser(request, env);
+    if (!user) return json({ error: "bad_key" }, 401);
+    if (method === "GET") return autologInfo(env, user);
+    if (method === "POST") return autolog(request, env, user);
+    return json({ error: "not_found" }, 404);
+  }
+
   const me = await currentUser(request, env);
   if (!me) return json({ error: "unauthorized" }, 401);
   if (route === "me" && method === "GET") {
@@ -616,6 +822,7 @@ export async function onRequest({ request, env, params }) {
   if (route === "prefs" && method === "POST") return setPrefs(request, env, me);
   if (route === "password" && method === "POST") return changePassword(request, env, me);
   if (route === "friends" && method === "POST") return friends(request, env, me);
+  if (route === "keys" && (method === "GET" || method === "POST")) return keys(request, env, me);
   if (route === "ledger" && method === "GET") return readLedger(request, env, me);
   if (route === "ledger" && method === "POST") return writeLedger(request, env, me);
   return json({ error: "not_found" }, 404);
