@@ -6,4 +6,4 @@ pages_build_output_dir = "public"
 # identifier, not a secret; the passphrase lives in the LEDGER_KEY secret.
 [[kv_namespaces]]
 binding = "LEDGER"
-id = "19744ee724e144a99a0e0dfe0b0624f6"
+id = "2d39e5fc04614a1283702bdf5c5adc2e"
