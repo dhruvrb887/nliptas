@@ -10,3 +10,4 @@ tracker/config.json
 tracker/.state.json
 tracker/.cache.json
 tracker/*.tmp
+__pycache__/
