@@ -2,8 +2,9 @@
 """
 Signal to Noise desktop tracker.
 
-Reads what you were doing from ActivityWatch (which records the app and window
-title in front of you, and when you're away from the keyboard), decides for each
+Reads what you were doing from watcher.py, our own macOS recorder, or from
+ActivityWatch on Windows and Linux (both record the app and window title in
+front of you, and when you're away from the keyboard), decides for each
 5-minute slot whether it was signal or noise, and fills those slots in on the
 site. Only slots you haven't scored yourself are filled; your own scoring
 always wins.
@@ -47,6 +48,7 @@ BROWSERS = ("chrome", "firefox", "safari", "edge", "brave", "arc", "opera", "viv
 DEFAULTS = {
     "site": "https://nliptas.pages.dev",
     "access_key": "",
+    "source": "auto",  # "watcher" (our macOS recorder), "activitywatch", or "auto": watcher on a Mac
     "activitywatch": "http://localhost:5600",
     "ai": True,
     "anthropic_api_key": "",
@@ -205,44 +207,83 @@ class ActivityWatch:
         return out
 
 
-def activity_by_slot(aw, start, end, ignore):
-    """{slot_start_utc: {activity: active_seconds}} for every slot in [start, end)."""
+def subtract(a, b):
+    """Parts of sorted intervals a not covered by sorted intervals b."""
+    out = []
+    for s, e in a:
+        cur = s
+        for b0, b1 in b:
+            if b1 <= cur or b0 >= e:
+                continue
+            if b0 > cur:
+                out.append((cur, b0))
+            cur = max(cur, b1)
+            if cur >= e:
+                break
+        if cur < e:
+            out.append((cur, e))
+    return out
+
+
+def from_activitywatch(cfg, start, end):
+    """(windows, active, web) from ActivityWatch's local API."""
+    aw = ActivityWatch(cfg["activitywatch"])
     b = aw.buckets()
     windows = [x for bid in b["window"] for x in aw.events(bid, start, end)]
-
     if b["afk"]:
         active = merge([(s, e) for bid in b["afk"] for s, e, d in aw.events(bid, start, end)
                         if d.get("status") == "not-afk"])
     else:
         active = [(start, end)]
-
     web = sorted((s, e, d) for bid in b["web"] for s, e, d in aw.events(bid, start, end))
+    return windows, active, web
+
+
+def from_watcher(cfg, start, end):
+    """(windows, active, web) from our own macOS recorder, watcher.py."""
+    sys.path.insert(0, HERE)
+    import watcher
+    evs = watcher.read_events(start, end)
+    if not evs and not os.path.isdir(watcher.DATA_DIR):
+        raise TrackerError("watcher.py hasn't recorded anything yet. Start it with: python3 watcher.py --install")
+    windows = [(ev["start"], ev["end"], ev) for ev in evs if not ev.get("afk")]
+    away = merge([(ev["start"], ev["end"]) for ev in evs if ev.get("afk")])
+    active = subtract(merge([(s, e) for s, e, _ in windows]), away)
+    return windows, active, []
+
+
+def activity_by_slot(cfg, start, end):
+    """{slot_start_utc: {activity: active_seconds}} for every slot in [start, end)."""
+    source = cfg["source"]
+    if source == "auto":
+        source = "watcher" if sys.platform == "darwin" else "activitywatch"
+    if source == "watcher":
+        windows, active, web = from_watcher(cfg, start, end)
+    elif source == "activitywatch":
+        windows, active, web = from_activitywatch(cfg, start, end)
+    else:
+        raise TrackerError('"source" in config.json should be "watcher", "activitywatch" or "auto".')
+    ignore = cfg["ignore"]
 
     pieces = []  # (start, end, activity)
     for s, e, d in windows:
         app = str(d.get("app") or "").strip()
         title = str(d.get("title") or "").strip()
-        name = f"{app} — {title}" if title else app
+        host = urllib.parse.urlparse(str(d.get("url") or "")).hostname or ""
+        name = f"{app} — {host} — {title}" if host else f"{app} — {title}" if title else app
         if not name or any(w.lower() in name.lower() for w in ignore):
             continue
         for a0, a1 in intersect([(s, e)], active):
-            if web and any(x in app.lower() for x in BROWSERS):
+            if web and not host and any(x in app.lower() for x in BROWSERS):
                 covered = []
                 for w0, w1, wd in web:
                     for p0, p1 in intersect([(a0, a1)], [(w0, w1)]):
-                        host = urllib.parse.urlparse(str(wd.get("url") or "")).hostname or ""
+                        whost = urllib.parse.urlparse(str(wd.get("url") or "")).hostname or ""
                         wt = str(wd.get("title") or title)
-                        pieces.append((p0, p1, f"{app} — {host} — {wt}" if host else name))
+                        pieces.append((p0, p1, f"{app} — {whost} — {wt}" if whost else name))
                         covered.append((p0, p1))
                 # Whatever the web watcher didn't cover keeps the window title.
-                gaps, cur = [], a0
-                for c0, c1 in merge(covered):
-                    if c0 > cur:
-                        gaps.append((cur, c0))
-                    cur = max(cur, c1)
-                if cur < a1:
-                    gaps.append((cur, a1))
-                pieces.extend((g0, g1, name) for g0, g1 in gaps)
+                pieces.extend((g0, g1, name) for g0, g1 in subtract([(a0, a1)], merge(covered)))
             else:
                 pieces.append((a0, a1, name))
 
@@ -390,8 +431,7 @@ def run_once(cfg, since=None, dry_run=False):
         log("Nothing new to sync yet.")
         return
 
-    aw = ActivityWatch(cfg["activitywatch"])
-    slots = activity_by_slot(aw, start, end, cfg["ignore"])
+    slots = activity_by_slot(cfg, start, end)
     # A dry run works without an access key; it just won't know your labels.
     info = site_call(cfg, "GET") if not dry_run or cfg["access_key"].startswith("slk_") else {}
     labels = info.get("labels") or {}
@@ -448,7 +488,7 @@ def load_config():
 
 
 def main():
-    p = argparse.ArgumentParser(description="Fill in Signal to Noise from ActivityWatch.")
+    p = argparse.ArgumentParser(description="Fill in Signal to Noise from watcher.py or ActivityWatch.")
     p.add_argument("--dry-run", action="store_true", help="show what would be filled in, send nothing")
     p.add_argument("--since", help="look back this far instead of since the last run, e.g. 90m, 6h, 2d")
     p.add_argument("--loop", action="store_true", help="keep running and sync every interval_minutes")

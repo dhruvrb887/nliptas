@@ -1,6 +1,7 @@
 {
   "site": "https://nliptas.pages.dev",
   "access_key": "slk_paste_the_key_from_settings_here",
+  "source": "auto",
 
   "ai": true,
   "anthropic_api_key": "sk-ant-paste_your_key_here",
@@ -16,7 +17,8 @@
     { "match": "nliptas.pages.dev", "kind": "signal", "label": "Planning" },
     { "match": "reddit.com", "kind": "noise", "label": "Reddit" },
     { "match": "instagram.com", "kind": "noise", "label": "Instagram" },
-    { "match": "Steam", "kind": "noise", "label": "Games" }
+    { "match": "Steam", "kind": "noise", "label": "Games" },
+    { "match": "Private browsing", "kind": "noise", "label": "Browsing" }
   ],
 
   "ignore": ["loginwindow", "lockscreen", "screensaver"],
