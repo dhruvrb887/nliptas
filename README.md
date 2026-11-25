@@ -39,8 +39,9 @@ Live at **https://nliptas.pages.dev**
   The count is how many blocks you've given that label: relabeling a block,
   clearing its label or switching it between signal and noise gives one back.
   Under the label there's an optional Details line (e.g. "history essay").
-- **Desktop tracker** — optional. A script on your computer (`tracker/`) reads
-  ActivityWatch, has AI sort each 5 minutes into signal or noise, and fills in
+- **Desktop tracker** — optional. A script on your computer (`tracker/`) records
+  what's on screen (its own recorder on a Mac, ActivityWatch elsewhere), has AI
+  sort each 5 minutes into signal or noise, and fills in
   hours you haven't scored. Auto blocks are shaded lighter with a dashed edge;
   switching, relabeling or splitting one makes it yours. It signs in with an
   access key from Settings, which can only reach `/api/autolog` and only fills
@@ -60,7 +61,7 @@ The headline number is signal ÷ (signal + noise). The raw S:N ratio sits beside
 | `build.sh` | Wraps it into `public/index.html` for static hosting. |
 | `public/index.html` | Generated. Committed so Pages needs no build step. |
 | `functions/api/[[path]].js` | Pages Function: accounts, friends and the ledger on Cloudflare KV. |
-| `tracker/` | Desktop tracker: fills in unscored hours from ActivityWatch. See `tracker/README.md`. |
+| `tracker/` | Desktop tracker: `watcher.py` records what's on screen (macOS; ActivityWatch elsewhere), `tracker.py` fills in unscored hours. See `tracker/README.md`. |
 | `scripts/seed-accounts.mjs` | One-off that created the nliu and kbahl accounts over the existing data. |
 
 Run `./build.sh` after every edit to `signal-ledger.html`.
